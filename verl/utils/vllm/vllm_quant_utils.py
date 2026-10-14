@@ -195,13 +195,13 @@ def _get_hf_config(model):
     return None
 
 
-def _is_mtp_layer_weight(name, model) -> bool:
-    """True when ``name`` belongs to a next-token-prediction (MTP) layer.
+def _is_absent_mtp_layer_weight(name, model) -> bool:
+    """True when ``name`` belongs to an MTP layer absent from the target model.
 
     The actor exports MTP layers while the vLLM runtime omits them when MTP is
     disabled, so such weights must be skipped during FP8 re-quantization.
-    Determined generically from the HF config: any ``layers.{i}.`` whose index
-    is ``>= num_hidden_layers`` is an MTP layer. No model-specific hardcoding.
+    Live drafter layers can start at ``num_hidden_layers`` too; check the
+    target's module tree before excluding them from quantization.
     """
     cfg = _get_hf_config(model)
     if cfg is None:
@@ -209,12 +209,21 @@ def _is_mtp_layer_weight(name, model) -> bool:
     num_hidden_layers = getattr(cfg, "num_hidden_layers", None)
     if not num_hidden_layers:
         return False
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
+    if mapper is not None:
+        mapped = mapper.apply_list([name])
+        if mapped:
+            name = mapped[0]
     # ``layers.{i}.`` may appear at any depth (e.g. ``model.layers.45.`` /
     # ``language_model.model.layers.45.``); match the first ``layers.N.`` token.
     m = re.search(r"\blayers\.(\d+)\.", name)
-    if m is None:
+    if m is None or int(m.group(1)) < num_hidden_layers:
         return False
-    return int(m.group(1)) >= num_hidden_layers
+    try:
+        model.get_submodule(name[: m.end() - 1])
+    except AttributeError:
+        return True
+    return False
 
 
 def get_module_from_param_name(model, name: str):
@@ -280,11 +289,11 @@ _FP8_CANDIDATE_LEAVES: frozenset = frozenset({"weight", "gate_up_proj", "down_pr
 
 
 def is_fp8_weight(name, model):
-    """Cache whether a weight belongs to an FP8 linear or expert layer, excluding MTP layer weights."""
+    """Cache whether a weight belongs to an FP8 layer, excluding MTP layers absent from the target."""
     # The actor exports the optional next-token-prediction (MTP) layer, while
     # the vLLM runtime omits it when MTP is disabled. Skip those weights so
     # verl does not re-quantize BF16->FP8 for a layer rollout never loads.
-    if _is_mtp_layer_weight(name, model):
+    if _is_absent_mtp_layer_weight(name, model):
         return False
     if name not in fp8_state.seen_params:
         fp8_state.seen_params.add(name)
