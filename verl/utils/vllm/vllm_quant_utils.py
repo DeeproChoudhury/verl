@@ -163,14 +163,34 @@ def _resolve_expert_weight_module(module):
 
 
 def _get_hf_config(model):
-    """Return the HF config on ``model`` (descending ``.config``/``.model``)."""
+    """Return the text-model HF config on ``model``.
+
+    Multimodal configs (including GLM-5.3-Flash) keep the decoder settings in
+    ``config.text_config`` rather than exposing ``num_hidden_layers`` on the
+    root config.  The MTP filter needs the text config to avoid traversing
+    actor-only ``layers.{num_hidden_layers}`` weights during refit.
+    """
     seen: set[int] = set()
     obj = model
     while obj is not None and id(obj) not in seen:
         seen.add(id(obj))
         cfg = getattr(obj, "config", None)
-        if cfg is not None and hasattr(cfg, "num_hidden_layers"):
-            return cfg
+        for candidate in (cfg, obj):
+            if candidate is None:
+                continue
+            if hasattr(candidate, "num_hidden_layers"):
+                return candidate
+            text_config = getattr(candidate, "text_config", None)
+            if text_config is not None and hasattr(text_config, "num_hidden_layers"):
+                return text_config
+            get_text_config = getattr(candidate, "get_text_config", None)
+            if get_text_config is not None:
+                try:
+                    text_config = get_text_config()
+                except (AttributeError, TypeError):
+                    text_config = None
+                if text_config is not None and hasattr(text_config, "num_hidden_layers"):
+                    return text_config
         obj = getattr(obj, "model", None)
     return None
 

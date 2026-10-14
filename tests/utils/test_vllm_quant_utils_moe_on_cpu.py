@@ -166,6 +166,16 @@ def test_vlm_checkpoint_names_resolve_to_live_module():
     assert mod.get_module_from_param_name(model, "model.language_model.proj.weight") is projection
 
 
+def test_mtp_filter_reads_multimodal_text_config():
+    """MTP weights in a multimodal config must not be traversed during refit."""
+    mod, _ = _load_quant_utils(fused_moe_is_function=False)
+    model = torch.nn.Module()
+    model.config = types.SimpleNamespace(text_config=types.SimpleNamespace(num_hidden_layers=45))
+
+    assert mod._is_mtp_layer_weight("language_model.model.layers.44.norm.weight", model) is False
+    assert mod._is_mtp_layer_weight("language_model.model.layers.45.norm.weight", model) is True
+
+
 def _build_model(ns: dict, moe_dtype=torch.float8_e4m3fn):
     """Build ``model.layers.0`` with an attention linear and a fused-MoE block."""
     linear_cls = ns["LinearBase"]
